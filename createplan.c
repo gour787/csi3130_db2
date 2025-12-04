@@ -1155,6 +1155,76 @@ create_bitmap_subplan(PlannerInfo *root, Path *bitmapqual,
 	return plan;
 }
 
+
+static HashJoin *
+create_hashjoin_plan(PlannerInfo *root, HashPath *best_path)
+{
+	/* CSI3130: Symmetric Hash Join project
+	 * For this assignment we leave the outer path as a regular plan node
+	 * and only wrap the inner path in a Hash node. The executor-side
+	 * changes (nodeHash.c / nodeHashjoin.c) are responsible for
+	 * simulating symmetric behaviour over this physical shape.
+	 */
+	HashJoin   *join_plan;
+	Hash	   *hash_plan;
+	Plan	   *outer_plan;
+	Plan	   *inner_plan;
+	List	   *tlist;
+	List	   *joinclauses;
+	List	   *otherclauses;
+	List	   *hashclauses;
+
+	/* Get the child plans */
+	outer_plan = create_plan_recurse(root, best_path->jpath.outerjoinpath, 0);
+	inner_plan = create_plan_recurse(root, best_path->jpath.innerjoinpath, 0);
+
+	/*
+	 * The plan targetlist is always the same as the path's; we
+	 * disuse any inherited physical tlist this join plan may
+	 * receive from either child node.
+	 */
+	disuse_physical_tlist(outer_plan, best_path->jpath.outerjoinpath);
+	disuse_physical_tlist(inner_plan, best_path->jpath.innerjoinpath);
+
+	/* Sort clause list into best execution order */
+	best_path->jpath.joinrestrictinfo =
+		order_qual_clauses(root, best_path->jpath.joinrestrictinfo);
+
+	/* Separate the hash clauses from the join qual */
+	join_pathkeys = best_path->jpath.pathkeys;
+	hashclauses = NIL;
+	otherclauses = NIL;
+	foreach(l, best_path->jpath.joinrestrictinfo)
+	{
+		RestrictInfo *rinfo = (RestrictInfo *) lfirst(l);
+
+		if (rinfo->hashjoinoperator)
+			hashclauses = lappend(hashclauses, rinfo->clause);
+		else
+			otherclauses = lappend(otherclauses, rinfo->clause);
+	}
+
+	/* Generate appropriate target list for join */
+	tlist = build_join_tlist(root,
+							 best_path->jpath.path.parent,
+							 outer_plan,
+							 inner_plan);
+
+	/* Create the Hash node on top of the inner plan */
+	hash_plan = make_hash(inner_plan);
+
+	/* And the HashJoin node on top of that */
+	join_plan = make_hashjoin(tlist,
+							  otherclauses,
+							  hashclauses,
+							  outer_plan,
+							  (Plan *) hash_plan,
+							  best_path->jpath.jointype,
+							  best_path->jpath.joinrestrictinfo);
+
+	return join_plan;
+}
+
 /*
  * create_tidscan_plan
  *	 Returns a tidscan plan for the base relation scanned by 'best_path'
